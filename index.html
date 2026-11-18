@@ -65,6 +65,12 @@
   </div>
   <div class="progress" id="translateProgress"><span id="translateProgressBar"></span></div>
   <div class="muted" id="translateStatus" style="margin-top:8px">Avval subtitr faylini yuklang, so‘ng Cloud AI serverga ulaning.</div>
+  <div class="notice" id="usagePanel" style="margin-top:12px;margin-bottom:0">
+    <b>AI sarfi — ushbu brauzer</b>
+    <div id="usageSummary" style="margin-top:5px">Hozircha sarf hisoboti yo‘q.</div>
+    <div class="progress show" style="margin-top:8px"><span id="usageProgressBar" style="width:0%"></span></div>
+    <div style="margin-top:7px;font-size:10px;opacity:.85">Bu taxminiy hisob va faqat shu brauzerdagi SUBTITR UZ so‘rovlarini qamraydi. Cloudflare hisobining aniq jami sarfini Workers AI → Usage bo‘limidan tekshiring.</div>
+  </div>
 </aside>
 <section class="work">
   <div class="worktop"><h3>Tarjima muharriri</h3><span class="counts" id="cueCount">Hali fayl yuklanmagan</span></div>
@@ -92,8 +98,8 @@
     <div class="card"><h3>AI va maxfiylik</h3>
       <p class="muted">Tarjima modeli Cloudflare Workers AI serverida ishlaydi. Laptopda WebGPU yoki lokal AI modeli ishlatilmaydi. Shu sababli avvalgi shader/GPU model xatolari ushbu versiyada bo‘lmaydi.</p>
       <div class="notice success">Asl subtitr fayli brauzerda o‘qiladi. Faqat dialog matni va zarur kontekst bo‘laklari tarjima uchun Cloudflare serveriga yuboriladi. Timeline, cue raqamlari va faylning to‘liq nusxasi AI'ga yuborilmaydi.</div>
-      <p class="muted">Cloudflare Qwen 3.8 27B model sahifasida Zero Data Retention xususiyatini ko‘rsatadi. Baribir tarjima qilinayotgan dialog matni tashqi AI xizmatiga uzatiladi.</p>
-      <p class="muted">Workers AI bepul rejasi kuniga 10,000 Neurons bilan cheklangan. Limit tugasa tarjima so‘rovlari keyingi resetgacha bajarilmaydi. Pullik rejaga o‘tish avtomatik amalga oshirilmaydi.</p>
+      <p class="muted">Cloudflare Gemma 4 26B A4B model sahifasida Zero Data Retention xususiyatini ko‘rsatadi. Baribir tarjima qilinayotgan dialog matni tashqi AI xizmatiga uzatiladi.</p>
+      <p class="muted">Workers AI bepul rejasi hisob bo‘yicha kuniga jami 10,000 Neuron bilan cheklangan. Bu sahifadagi hisob taxminiy; Cloudflare dashboardidagi Usage ko‘rsatkichi haqiqiy hisobdir. Limit tugasa tarjima so‘rovlari bloklanadi. Pullik rejaga avtomatik o‘tilmaydi.</p>
       <div class="notice">Brauzer mosligi: yangilangan Chrome, Edge, Firefox va Safari. Eski brauzerlar kafolatlanmaydi.</div>
     </div>
   </div>
@@ -105,6 +111,8 @@
 const $ = (id) => document.getElementById(id);
 const state = { doc:null, fileName:'', fileSize:0, workerUrl:'', accessKey:'', connected:false, busy:false, cancel:false, translated:false, hasResult:false, currentPage:'workspace' };
 const SYSTEM_PROMPT = `You are a professional literary subtitle translator into Uzbek. Translate the supplied dialogue into fluent, natural, accurate Uzbek in Latin script. Preserve the exact meaning, character voice, tone, humor, emotion and context. Do not summarize, explain, add or omit anything. Preserve every placeholder token exactly once, with the exact spelling. Return only a valid JSON array. Each object must contain the same id and a translatedText string. Do not include markdown or commentary.`;
+const DAILY_FREE_NEURONS = 10000;
+const USAGE_STORAGE_KEY = 'subtitrUzEstimatedNeuronUsage';
 const stylePrompts = {
   literary:'Use clear, elegant standard literary Uzbek without sounding archaic.',
   natural:'Use natural spoken Uzbek suitable for film dialogue.',
@@ -112,6 +120,34 @@ const stylePrompts = {
   formal:'Use respectful, grammatically correct formal Uzbek where the scene requires it.'
 };
 function notify(text, kind='') { $('translateStatus').textContent = text; $('translateStatus').className = kind==='error'?'muted' : 'muted'; }
+function usageUtcDay(){ return new Date().toISOString().slice(0,10); }
+function readBrowserUsage(){
+  try {
+    const saved=JSON.parse(localStorage.getItem(USAGE_STORAGE_KEY)||'null');
+    if(saved && saved.day===usageUtcDay()) return saved;
+  } catch {}
+  return {day:usageUtcDay(),estimatedNeurons:0,promptTokens:0,completionTokens:0,batches:0,complete:true};
+}
+function updateUsagePanel(){
+  const usage=readBrowserUsage();
+  const value=Math.max(0,Number(usage.estimatedNeurons)||0);
+  const pct=Math.min(100,(value/DAILY_FREE_NEURONS)*100);
+  $('usageSummary').textContent=`${value.toLocaleString('uz-UZ')} / ${DAILY_FREE_NEURONS.toLocaleString('uz-UZ')} taxminiy Neuron · ${usage.batches||0} ta AI so‘rovi`;
+  $('usageProgressBar').style.width=pct.toFixed(1)+'%';
+  const panel=$('usagePanel');
+  panel.classList.toggle('error',pct>=100);
+  if(usage.complete===false) $('usageSummary').textContent += ' · model token hisobotini to‘liq bermadi';
+}
+function recordBrowserUsage(report){
+  if(!report || report.available!==true || !Number.isFinite(Number(report.estimatedNeurons))) return;
+  const usage=readBrowserUsage();
+  usage.estimatedNeurons=(Number(usage.estimatedNeurons)||0)+Math.max(0,Number(report.estimatedNeurons));
+  usage.promptTokens=(Number(usage.promptTokens)||0)+(Number(report.promptTokens)||0);
+  usage.completionTokens=(Number(usage.completionTokens)||0)+(Number(report.completionTokens)||0);
+  usage.batches=(Number(usage.batches)||0)+1;
+  try{localStorage.setItem(USAGE_STORAGE_KEY,JSON.stringify(usage));}catch{usage.complete=false;}
+  updateUsagePanel();
+}
 function setProgress(id, pct, text='') { $(id).classList.toggle('show', pct>=0); const bar = $(id+'Bar'); if(bar) bar.style.width = Math.max(0,Math.min(100,pct))+'%'; if(text) $('modelProgressText').textContent=text; }
 function splitPreserve(text, regex) { return text.split(regex); }
 function parseSRT(raw) {
@@ -205,12 +241,13 @@ async function connectCloud(){
 function parseLLMJson(raw){let s=raw.trim().replace(/^```(?:json)?\s*/i,'').replace(/```\s*$/,'').trim();try{return JSON.parse(s);}catch{}const a=s.indexOf('['),b=s.lastIndexOf(']');if(a>=0&&b>a)return JSON.parse(s.slice(a,b+1));throw new Error('Model JSON formatida javob bermadi.');}
 async function translateBatch(batch,startIndex){
   if(!state.connected)throw new Error('Avval Cloud AI serverga ulaning.');
-  const prev=state.doc.cues.slice(Math.max(0,startIndex-3),startIndex).map(c=>{const p=protectedTokens(c.originalText,state.doc.format);const uz=protectedTokens(c.translatedText||'',state.doc.format);return {original:p.safe,originalFormatHints:formatHintsFor(p.tokens,state.doc.format),uzbek:uz.safe,uzbekFormatHints:formatHintsFor(uz.tokens,state.doc.format)};});
-  const next=state.doc.cues.slice(startIndex+batch.length,startIndex+batch.length+3).map(c=>{const p=protectedTokens(c.originalText,state.doc.format);return {original:p.safe,formatHints:formatHintsFor(p.tokens,state.doc.format)};});
+  const prev=state.doc.cues.slice(Math.max(0,startIndex-2),startIndex).map(c=>{const p=protectedTokens(c.originalText,state.doc.format);const uz=protectedTokens(c.translatedText||'',state.doc.format);return {original:p.safe,originalFormatHints:formatHintsFor(p.tokens,state.doc.format),uzbek:uz.safe,uzbekFormatHints:formatHintsFor(uz.tokens,state.doc.format)};});
+  const next=state.doc.cues.slice(startIndex+batch.length,startIndex+batch.length+2).map(c=>{const p=protectedTokens(c.originalText,state.doc.format);return {original:p.safe,formatHints:formatHintsFor(p.tokens,state.doc.format)};});
   const protectedBatch=batch.map((c,localIndex)=>{const p=protectedTokens(c.originalText,state.doc.format);c.tokens=p.tokens;return {id:String(localIndex),text:p.safe,formatHints:formatHintsFor(p.tokens,state.doc.format)};});
   const payload={sourceLanguage:$('sourceLang').value,targetLanguage:$('targetLang').value,style:$('style').value,styleInstruction:stylePrompts[$('style').value],glossary:$('glossary').value,previousContext:prev,upcomingContext:next,subtitles:protectedBatch};
   const response=await fetch(state.workerUrl+'/translate',{method:'POST',headers:{'Content-Type':'application/json','X-App-Key':state.accessKey},body:JSON.stringify(payload),cache:'no-store'});
   const data=await response.json().catch(()=>({}));
+  if(data.usage)recordBrowserUsage(data.usage);
   if(!response.ok)throw new Error(data.error||`Cloud AI server xatosi: HTTP ${response.status}`);
   const parsed=data.translations;
   if(!Array.isArray(parsed))throw new Error('Cloud AI noto‘g‘ri javob qaytardi.');
@@ -226,7 +263,7 @@ function downloadResult(){if(!state.doc)return;const output=serialize(state.doc)
 function sample(){const txt=`1\n00:00:01,200 --> 00:00:03,500\nI don't believe you.\n\n2\n00:00:04,000 --> 00:00:06,000\nWhat are you talking about?\n\n3\n00:00:06,500 --> 00:00:09,000\nWe have to protect our family.`;const blob=new Blob([txt],{type:'text/plain'});const f=new File([blob],'sample-subtitles.srt',{type:'text/plain'});loadFile(f);}
 function changePage(name){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===name));document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id==='page-'+name));state.currentPage=name;if(name==='history')renderHistory();}
 $('dropzone').addEventListener('click',()=>$('fileInput').click());$('dropzone').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')$('fileInput').click();});$('fileInput').addEventListener('change',e=>{if(e.target.files[0])loadFile(e.target.files[0]);e.target.value='';});['dragenter','dragover'].forEach(ev=>$('dropzone').addEventListener(ev,e=>{e.preventDefault();$('dropzone').classList.add('drag');}));['dragleave','drop'].forEach(ev=>$('dropzone').addEventListener(ev,e=>{e.preventDefault();$('dropzone').classList.remove('drag');}));$('dropzone').addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)loadFile(f);});$('removeFile').addEventListener('click',()=>{state.doc=null;state.fileName='';state.translated=false;state.hasResult=false;showDoc();notify('Fayl olib tashlandi.');$('translateBtn').disabled=true;});$('connectCloud').addEventListener('click',connectCloud);$('translateBtn').addEventListener('click',runTranslation);$('cancelBtn').addEventListener('click',()=>{state.cancel=true;$('cancelBtn').disabled=true;});$('downloadBtn').addEventListener('click',downloadResult);$('sampleBtn').addEventListener('click',sample);$('searchCues').addEventListener('input',e=>renderCues(e.target.value));$('showAll').addEventListener('click',()=>{$('searchCues').value='';renderCues();});$('saveCloudSettings').addEventListener('click',()=>saveCloudSettings(true));function resetCloudConnection(){state.connected=false;$('serverStatus').textContent='Qayta ulanish kerak';$('serverStatus').style.color='var(--warn)';setModelStatus('Cloud AI sozlamalari o‘zgardi');$('translateBtn').disabled=true;} $('workerUrl').addEventListener('change',()=>{$('workerUrlSettings').value=$('workerUrl').value;resetCloudConnection();});$('accessKey').addEventListener('change',()=>{$('accessKeySettings').value=$('accessKey').value;resetCloudConnection();});$('workerUrlSettings').addEventListener('change',()=>{$('workerUrl').value=$('workerUrlSettings').value;resetCloudConnection();});$('accessKeySettings').addEventListener('change',()=>{$('accessKey').value=$('accessKeySettings').value;resetCloudConnection();});document.querySelectorAll('.nav button').forEach(b=>b.addEventListener('click',()=>changePage(b.dataset.page)));$('clearHistory').addEventListener('click',()=>{localStorage.removeItem('subtitrUzHistory');renderHistory();});
-loadCloudSettings();$('serverStatus').textContent='Server sozlanmagan';$('runtimeStatus').textContent='Cloud AI · GPU talab qilinmaydi';$('translateBtn').disabled=true;
+loadCloudSettings();updateUsagePanel();$('serverStatus').textContent='Server sozlanmagan';$('runtimeStatus').textContent='Cloud AI · GPU talab qilinmaydi';$('translateBtn').disabled=true;
 window.__SUBTITR_UZ_TEST__={parseFile,serialize,compareAndValidate,transliterate,protectedTokens,checkAndRestore};
 </script>
 </body>
