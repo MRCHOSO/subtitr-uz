@@ -163,6 +163,19 @@ function parseASS(raw) {
 function parseFile(name,text){const ext=(name.split('.').pop()||'').toLowerCase();if(ext==='srt')return parseSRT(text);if(ext==='vtt')return parseVTT(text);if(ext==='ass'||ext==='ssa')return parseASS(text);throw new Error('Faqat SRT, VTT, ASS yoki SSA fayllar qabul qilinadi.');}
 function serialize(doc){let out='';if(doc.format==='ass'){out=doc.records.map(r=>r.type==='raw'?r.raw:(doc.cues[r.index].prefix+doc.cues[r.index].fields.join(',')+','+(doc.cues[r.index].translatedText||''))).join(doc.nl);}else{out=doc.segments.map(s=>{if(s.type==='raw')return s.raw;const c=doc.cues[s.index];const head=[...c.prefixLines,c.timeLine].join(doc.nl);return head+doc.nl+(c.translatedText||'');}).join('');}return (doc.hasBOM?'\uFEFF':'')+out;}
 function protectedTokens(text,format){const re=format==='ass'?/(\{[^}]*\}|\\[Nnh])/g:/(<[^>]+>|&(?:#\d+|#x[\da-f]+|[a-z]+);)/gi;const tokens=[];const safe=text.replace(re,match=>{const token=`ZXQ${String(tokens.length).padStart(4,'0')}QXZ`;tokens.push({token,raw:match});return token;});return {safe,tokens};}
+function formatHintsFor(tokens,format){
+  return tokens.map(({token,raw})=>{
+    let kind='protected formatting marker; do not translate';
+    if(format==='ass'){
+      if(raw==='\\N')kind='ASS forced hard line break: text after this marker starts on the next displayed line';
+      else if(raw==='\\n')kind='ASS soft line break: preserve this line-break marker in its exact position';
+      else if(raw==='\\h')kind='ASS non-breaking space: preserve the spacing marker';
+      else if(raw.startsWith('{'))kind='ASS override block: formatting/position/colour/animation command, not dialogue';
+    }else if(raw.startsWith('<'))kind='HTML/VTT formatting tag, not dialogue';
+    else if(raw.startsWith('&'))kind='HTML entity; preserve exactly';
+    return {token,kind};
+  });
+}
 function checkAndRestore(text,tokens){let restored=text;for(const t of tokens){const count=restored.split(t.token).length-1;if(count!==1)throw new Error('AI format tegini noto‘g‘ri qaytardi: '+t.raw);restored=restored.replace(t.token,t.raw);}if(/ZXQ\d{4}QXZ/.test(restored))throw new Error('Tarjimada noma’lum himoyalangan token qoldi.');return restored;}
 function transliterate(text){const chunks=text.split(/(\{[^}]*\}|\\[Nnh]|<[^>]+>|&(?:#\d+|#x[\da-f]+|[a-z]+);)/gi);return chunks.map((chunk,i)=>{if(i%2===1)return chunk;let t=chunk.replace(/([OoGg])[‘’'`ʻʼ]/g,'$1ʻ').replace(/[‘’'`ʼ]/g,'ʼ');const digraphs=[['Oʻ','Ў'],['oʻ','ў'],['Gʻ','Ғ'],['gʻ','ғ'],['SH','Ш'],['Sh','Ш'],['sh','ш'],['CH','Ч'],['Ch','Ч'],['ch','ч'],['YO','Ё'],['Yo','Ё'],['yo','ё'],['YU','Ю'],['Yu','Ю'],['yu','ю'],['YA','Я'],['Ya','Я'],['ya','я'],['TS','Ц'],['Ts','Ц'],['ts','ц']];const holds=[];for(const [a,b] of digraphs){const re=new RegExp(a.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g');t=t.replace(re,()=>{const k=`\uE000${holds.length}\uE001`;holds.push(b);return k;});}const map={A:'А',a:'а',B:'Б',b:'б',D:'Д',d:'д',E:'Е',e:'е',F:'Ф',f:'ф',G:'Г',g:'г',H:'Ҳ',h:'ҳ',I:'И',i:'и',J:'Ж',j:'ж',K:'К',k:'к',L:'Л',l:'л',M:'М',m:'м',N:'Н',n:'н',O:'О',o:'о',P:'П',p:'п',Q:'Қ',q:'қ',R:'Р',r:'р',S:'С',s:'с',T:'Т',t:'т',U:'У',u:'у',V:'В',v:'в',X:'Х',x:'х',Y:'Й',y:'й',Z:'З',z:'з','ʼ':'ъ'};t=[...t].map(c=>map[c]??c).join('');t=t.replace(/\uE000(\d+)\uE001/g,(_,i)=>holds[Number(i)]??'');t=t.replace(/(^|[\s([{"'—–-])Ye/g,'$1Е').replace(/(^|[\s([{"'—–-])ye/g,'$1е').replace(/(^|[\s([{"'—–-])E/g,'$1Э').replace(/(^|[\s([{"'—–-])e/g,'$1э');return t;}).join('');}
 function cueTags(text,format){return protectedTokens(text,format).tokens.map(t=>t.raw);}
@@ -192,9 +205,9 @@ async function connectCloud(){
 function parseLLMJson(raw){let s=raw.trim().replace(/^```(?:json)?\s*/i,'').replace(/```\s*$/,'').trim();try{return JSON.parse(s);}catch{}const a=s.indexOf('['),b=s.lastIndexOf(']');if(a>=0&&b>a)return JSON.parse(s.slice(a,b+1));throw new Error('Model JSON formatida javob bermadi.');}
 async function translateBatch(batch,startIndex){
   if(!state.connected)throw new Error('Avval Cloud AI serverga ulaning.');
-  const prev=state.doc.cues.slice(Math.max(0,startIndex-2),startIndex).map(c=>{const p=protectedTokens(c.originalText,state.doc.format);return {original:p.safe,uzbek:protectedTokens(c.translatedText||'',state.doc.format).safe};});
-  const next=state.doc.cues.slice(startIndex+batch.length,startIndex+batch.length+2).map(c=>{const p=protectedTokens(c.originalText,state.doc.format);return {original:p.safe};});
-  const protectedBatch=batch.map((c,localIndex)=>{const p=protectedTokens(c.originalText,state.doc.format);c.tokens=p.tokens;return {id:String(localIndex),text:p.safe};});
+  const prev=state.doc.cues.slice(Math.max(0,startIndex-3),startIndex).map(c=>{const p=protectedTokens(c.originalText,state.doc.format);const uz=protectedTokens(c.translatedText||'',state.doc.format);return {original:p.safe,originalFormatHints:formatHintsFor(p.tokens,state.doc.format),uzbek:uz.safe,uzbekFormatHints:formatHintsFor(uz.tokens,state.doc.format)};});
+  const next=state.doc.cues.slice(startIndex+batch.length,startIndex+batch.length+3).map(c=>{const p=protectedTokens(c.originalText,state.doc.format);return {original:p.safe,formatHints:formatHintsFor(p.tokens,state.doc.format)};});
+  const protectedBatch=batch.map((c,localIndex)=>{const p=protectedTokens(c.originalText,state.doc.format);c.tokens=p.tokens;return {id:String(localIndex),text:p.safe,formatHints:formatHintsFor(p.tokens,state.doc.format)};});
   const payload={sourceLanguage:$('sourceLang').value,targetLanguage:$('targetLang').value,style:$('style').value,styleInstruction:stylePrompts[$('style').value],glossary:$('glossary').value,previousContext:prev,upcomingContext:next,subtitles:protectedBatch};
   const response=await fetch(state.workerUrl+'/translate',{method:'POST',headers:{'Content-Type':'application/json','X-App-Key':state.accessKey},body:JSON.stringify(payload),cache:'no-store'});
   const data=await response.json().catch(()=>({}));
